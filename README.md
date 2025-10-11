@@ -1,88 +1,72 @@
-# 手搓迷你Kode【青春版】
-Languages: [中文](README.md) | [English](README_en.md)    
-正式版：[Kode - 开源Agent CLI 编码 & 运维工具](https://github.com/shareAI-lab/Kode)  
-<img width="360" height="360" alt="image" src="https://github.com/user-attachments/assets/9813fca0-a6dd-4813-972e-f9bf6d62add8" />  <br>
-Fellow us on X: https://x.com/baicai003    
+# mini Kode Agent
 
-<img height="450" alt="image" src="https://github.com/user-attachments/assets/0e1e31f8-064f-4908-92ce-121e2eb8d453" />
-<img height="450" alt="image" src="https://github.com/user-attachments/assets/2884ea3a-a299-463a-b69c-2ec93088fd17" />
+This repository showcases a step-by-step recreation of a “mini Kode” workflow. With a few hundred lines of Python we rebuild the essential loops behind Anthropic’s engineering assistant and release them in two major stages:
 
-<img width="690" alt="image" src="https://github.com/user-attachments/assets/e04d0e73-b6d9-4308-91cc-279f569856fb" />
+- **v1 (baseline)** – demonstrates the core *model-as-agent* loop: the LLM is the only decision maker, the CLI just exposes tools for reading, editing, writing files, and running shell commands.
+- **v2 (todos)** – layers structured planning on top of v1 with a shared todo board and system reminders so the model stays disciplined during multi-step tasks.
 
-本仓库展示了一个逐步迭代的「迷你 Kode」实现。我们用最少的代码复刻官方工作流的关键体验，分为两个主要版本：
-
-- **v1 基础版**：聚焦「模型即代理（Model as Agent）」的核心循环，让大模型在一个最小可用的 CLI 中读取、编辑、写入文件并执行命令。
-- **v2 待办版**：在 v1 的基础上，引入结构化计划工具（Todo）、系统提醒等机制，使模型具备显式规划和自我监督能力。
-
-以下内容将详细介绍两个版本的运转原理，以及它们之间的思想差异。
+Below is a detailed walkthrough of how each version operates and what changed between them.
 
 ---
 
-## v1：Model as Agent 的最小实现
+## v1: Minimal “Model as Agent” Loop
 
-v1 版本的目标是验证“代码只负责提供工具，大模型才是唯一的行为主体”这一理念。整个 CLI 只有约 400 行 Python 代码，却包含了 Agent 最关键的要素：
+The first version proves a simple principle: **code supplies tools, the model drives the work**. About 400 lines of Python cover the following pillars:
 
-### 1. 系统角色设定
-- 通过 `SYSTEM` 字符串明确约束模型：以仓库为工作区、优先用工具行动、结束时要总结。
-- 这些规则让模型在长对话里始终记得“该做事”而不是“闲聊”。
+### 1. System prompt guardrails
+- The `SYSTEM` string reminds the model that it lives inside the repository, must act through tools, and should summarize when finished.
+- This keeps multi-turn conversations action oriented instead of drifting into idle chat.
 
-### 2. 统一的工具调度
-- 预置了四个核心工具：`bash`、`read_file`、`write_file`、`edit_text`。
-- 调度逻辑会根据模型的 `tool_use` 块调用对应的执行函数，输出结果再以 `tool_result` 写回对话。
-- 所有工具都带有安全检查（路径约束、危险命令禁用、输出裁剪），确保运行可控。
+### 2. Unified tool dispatch
+- The CLI exposes four tools: `bash`, `read_file`, `write_file`, and `edit_text`.
+- When the model outputs a `tool_use` block, the dispatcher runs the corresponding helper and returns a `tool_result` block with truncated, colorized output.
+- Safety checks gate the tools (path validation, banned commands, output clamping) to prevent runaway actions.
 
-### 3. 控制台体验
-- `Spinner` 线程在模型推理时显示等待动画。
-- `pretty_tool_line` 和 `pretty_sub_line` 负责把每次工具调用的标题与输出排版成易读的格式。
-- 与模型的对话历史被完整保留在 `messages` 中，确保上下文一致性。
+### 3. Terminal experience
+- A background `Spinner` thread indicates model latency.
+- `pretty_tool_line` and `pretty_sub_line` format every tool call in a readable, ANSI-colored layout.
+- The full conversation is stored in `messages`, preserving context across tool invocations.
 
-### 4. 主循环行为
-- CLI 启动后提示工作目录，用户输入即时追加到 `history`。
-- 每轮调用 `client.messages.create`，若模型请求使用工具，则递归处理直到返回最终文本。
-- 异常处理通过 `log_error_debug` 记录，避免 CLI 直接崩溃。
+### 4. Main event loop
+- The CLI prints the current workspace, accepts user input, and appends it to history.
+- Each turn calls `client.messages.create`; if the model wants tools, the loop recursively executes them until plain text is returned.
+- Errors are caught by `log_error_debug` so the session doesn’t crash.
 
-> **核心理念：** 只要提供一个稳定的“工具壳”，模型就能主动完成绝大多数编码任务。v1 证明了 Kode 成功的秘诀不在各种节点雕花流转，而在于让模型保持连续上下文 + 拥有持续调用工具的能力。
-
----
-
-## v2：结构化规划与系统提醒
-
-v2 在 v1 的基础上，重点解决“模型如何保持有序规划”这个问题。我们新增了 Todo 工具链与系统提醒机制，让模型始终处于结构化、可追踪的工作流中。
-
-### 1. Todo 工具链
-- **`TodoManager`**：维护最多 20 条待办，强制唯一的 `in_progress` 条目，并对输入做严格校验（ID、状态、描述、表单名称）。
-- **`TodoWrite` 工具**：模型可以调用它来创建、更新、完成待办，CLI 会即时渲染彩色状态并输出统计结果。
-- **状态可视化**：
-  - `pending` → 柔和灰色
-  - `in_progress` → 高亮蓝色
-  - `completed` → 绿色并带删除线
-
-通过 Todo 面板，模型和用户都能清楚看到当前计划、正在进行的步骤以及已完成情况。
-
-### 2. System Reminder（系统提醒）
-- **初始提醒**：会话开始前，将「请使用 Todo 工具管理多步骤任务」作为特殊上下文块注入。
-- **周期提醒**：如果连续 10 轮对话没有 Todo 更新，会再注入一次提醒，温和提示模型恢复规划。
-- **自动重置**：每当 Todo 有更新，计数器归零，避免重复“催促”。
-
-这一机制确保模型不会在长对话里忘记使用 Todo，也让用户免于手动监督。
-
-### 3. 交互流程改动
-- 输入阶段：将用户消息与待发送的提醒块合并为同一组 content，维护对话一致性。
-- 输出阶段：Todo 工具的结果即时打印，并写入历史，让模型在下一轮能够“看到”自己刚刚更新的计划。
-- 文案统一：所有提示与汇报改为英文，保持更适合海外产品的风格（代码中不再包含中文）。
-
-### 4. 设计收益
-- **结构化约束**：模型必须先规划再执行，避免“想到哪写到哪”。
-- **自我监督**：Todo 视图是模型的外部记忆，持续提醒它当前所处的步骤。
-- **可追溯**：整个会话的待办记录可用于回顾与审计。
-
-> **扩展链接**：如果想体验生产级的 Claude Code 工作流，推荐试试我们维护的开源项目 [Kode](https://github.com/shareAI-lab/Kode)。它在这个迷你仓库的基础上加入了 Bash 扩展、WebSearch/WebFetch、Docker 支持、IDE 插件等高级功能。
+> **Key insight:** a stable tool shell plus a focused system prompt is enough to let the model behave like a real coding agent. UI polish is optional; tool access is everything.
 
 ---
 
-## 总结
+## v2: Structured Planning and System Reminders
 
-- **v1 思想**：构建最小工具循环，证明“模型即代理”的可行性。
-- **v2 思想**：在最小循环上加固结构化规划与系统提醒，让模型具备可视化的计划能力和自我约束力。
+Version 2 answers a natural question: *how do we keep the model organized over longer tasks?* The upgrade introduces a todo board, a reminder mechanism, and English-only copy to keep the workflow predictable.
 
-接下来，我们还计划在 mini Kode 中逐步引入 Task 子代理、更多类型的提醒矩阵等能力，并把 Kode 项目中沉淀的实践回流到这个教学仓库，帮助更多开发者快速理解并构建自己的智能代理系统。
+### 1. Todo toolchain
+- **`TodoManager`** maintains up to 20 entries, guarantees at most one `in_progress` item, and validates IDs, statuses, and descriptions.
+- **`TodoWrite`** becomes a first-class tool. The model calls it to create/update/complete todos; the CLI immediately renders colored status lines plus summary stats.
+- **Status colors** use a consistent palette: grey for pending, blue for in progress, green with strikethrough for completed.
+
+### 2. System reminders
+- **Initial reminder:** before the first user message, a system block instructs the model to manage multi-step work through the todo board.
+- **10-turn reminder:** if ten consecutive turns pass without a todo update, another reminder block is injected to nudge the model back to structured planning.
+- **Auto reset:** every todo update resets the counter so reminders only trigger when discipline lapses.
+
+### 3. Interaction changes
+- On input, user text and any pending reminders are bundled into a single content list so the model sees consistent context.
+- On output, todo results are printed immediately and appended to history, giving the model a short-term memory of its own plan.
+- All messages, summaries, and errors are now in English to match the neutral CLI aesthetic.
+
+### 4. Benefits
+- **Structured guardrails:** the model has to plan before acting, reducing “winging it” behavior.
+- **Self-supervision:** the todo board is an external memory surface that keeps current priorities visible.
+- **Auditability:** the session transcript contains every todo change, which makes reviews and debugging easier.
+
+> **Looking for a production-ready toolkit?** Check out [Kode](https://github.com/shareAI-lab/Kode), the open-source Claude Code implementation we maintain. It adds Windows Bash support, WebSearch/WebFetch, Docker adapters, and IDE plugins on top of the ideas explored here.
+
+---
+
+## Summary
+
+- **v1 philosophy:** prove the minimal model-as-agent loop—tools are thin wrappers, the LLM carries the project.
+- **v2 philosophy:** enforce explicit planning via todos and system reminders so the workflow stays organized and transparent.
+
+Future iterations will experiment with sub-agent tasks, richer reminder matrices, and will keep backporting mature features from Kode into this learning-friendly codebase. Contributions and experiments are welcome!
